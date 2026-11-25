@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.DS_Store
+*.log
+.playwright/
+screenshots/
+.screens/
+coverage/
+.vite/
+tests/fixtures/big.glb
+tests/fixtures/bigmesh.obj
