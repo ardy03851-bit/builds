@@ -9,6 +9,7 @@
  * Pure parsing functions are exported separately so they can be unit-tested
  * with hand-built byte arrays.
  */
+import { Inflate } from 'fflate';
 
 const SIG_EOCD = 0x06054b50;
 const SIG_EOCD64_LOC = 0x07064b50;
@@ -280,9 +281,59 @@ export class ZipReader {
     return bytes;
   }
 
-  async readBlob(path) {
-    const bytes = await this.read(path);
-    return new Blob([bytes], { type: 'application/octet-stream' });
+  /** Returns an extracted Blob, slicing stored entries without copying bytes. */
+  async readBlob(path, { verify = false, type = 'application/octet-stream' } = {}) {
+    const entry = this.index.get(path);
+    if (!entry) throw new Error(`"${path}" is not in the archive.`);
+    if (entry.encrypted) throw new Error(`"${path}" is password protected.`);
+
+    if (entry.method !== 0 && entry.method !== 8) {
+      throw new Error(`Unsupported compression method ${entry.method} for "${path}".`);
+    }
+
+    const head = new Uint8Array(await this.blob.slice(entry.localOffset, entry.localOffset + 30).arrayBuffer());
+    const header = parseLocalHeader(head, entry.localOffset);
+    if (header.method !== entry.method || header.encrypted) throw new Error(`Invalid local header for "${path}".`);
+    const start = header.dataOffset;
+    const end = start + entry.compressedSize;
+    if (start < 0 || end > this.blob.size) throw new Error(`Payload is out of range for "${path}".`);
+    const source = this.blob.slice(start, end);
+
+    if (entry.method === 8) {
+      if (typeof DecompressionStream === 'function') {
+        const output = source.stream().pipeThrough(new DecompressionStream('deflate-raw'));
+        const reader = output.getReader();
+        const chunks = [];
+        let size = 0;
+        let checksum = 0;
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          size += value.byteLength;
+          if (size > entry.uncompressedSize) throw new Error(`Size mismatch for "${path}".`);
+          if (verify) checksum = crc32(value, checksum);
+          chunks.push(value);
+        }
+        if (size !== entry.uncompressedSize) throw new Error(`Size mismatch for "${path}".`);
+        if (verify && checksum !== entry.crc) throw new Error(`CRC mismatch for "${path}".`);
+        return new Blob(chunks, { type });
+      }
+      const bytes = await this.read(path, { verify });
+      return new Blob([bytes], { type });
+    }
+
+    if (source.size !== entry.uncompressedSize) throw new Error(`Size mismatch for "${path}".`);
+    if (verify) {
+      let checksum = 0;
+      const stream = source.stream().getReader();
+      for (;;) {
+        const { done, value } = await stream.read();
+        if (done) break;
+        checksum = crc32(value, checksum);
+      }
+      if (checksum !== entry.crc) throw new Error(`CRC mismatch for "${path}".`);
+    }
+    return source.slice(0, source.size, type);
   }
 }
 
@@ -295,7 +346,6 @@ export async function inflateStream(blob, expectedSize, onProgress) {
     const out = blob.stream().pipeThrough(new DecompressionStream('deflate-raw'));
     return collectStream(out, expectedSize, onProgress);
   }
-  const { Inflate } = await import('fflate');
   const chunks = [];
   let total = 0;
   await new Promise((resolve, reject) => {

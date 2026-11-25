@@ -8,7 +8,7 @@
 export const MODEL_EXTENSIONS = [
   'glb', 'gltf', 'fbx', 'obj', 'stl', 'ply', 'dae', '3mf',
 ];
-export const TEXTURE_EXTENSIONS = ['png', 'jpg', 'jpeg', 'webp', 'avif', 'ktx2', 'basis'];
+export const TEXTURE_EXTENSIONS = ['png', 'jpg', 'jpeg', 'webp', 'avif', 'ktx2', 'basis', 'tga'];
 export const HDR_EXTENSIONS = ['hdr', 'exr'];
 export const AUDIO_EXTENSIONS = ['mp3', 'ogg', 'wav', 'm4a'];
 export const VIDEO_EXTENSIONS = ['mp4', 'webm'];
@@ -22,6 +22,7 @@ const ALL_EXTENSIONS = [
   ...AUDIO_EXTENSIONS,
   ...VIDEO_EXTENSIONS,
   ...MATERIAL_EXTENSIONS,
+  ...DOC_EXTENSIONS,
 ];
 
 /** Lower-case extension without the dot. */
@@ -108,6 +109,7 @@ export function isSupportedFile(path) {
 export const mimeForExtension = (ext) => {
   const map = {
     png: 'image/png',
+    tga: 'image/x-tga',
     jpg: 'image/jpeg',
     jpeg: 'image/jpeg',
     webp: 'image/webp',

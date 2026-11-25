@@ -25,17 +25,18 @@ npm run preview  # serve the production build locally
 
 ## What it does
 
-- **Build scenes:** add imported models and primitives, move/rotate/scale with gizmos, frame the selection, snap transforms, duplicate, delete, undo, and redo.
+- **Build scenes:** add imported models and primitives, move/rotate/scale with gizmos, frame the selection, snap transforms, group/ungroup and reparent without moving objects, duplicate, delete, and undo/redo scene, visibility, and lock edits.
 - **Import models:** GLB/glTF, FBX, OBJ/MTL, STL, PLY, DAE, and 3MF. glTF Draco, Meshopt, and KTX2/Basis resources use the bundled local decoders/transcoder.
-- **Import textures and environments:** common raster maps (PNG, JPG/JPEG, WebP, AVIF, KTX2, Basis) and HDR/EXR environment images. Assign maps from the material inspector or drop a texture onto a material slot.
+- **Import textures and environments:** common raster maps (PNG, JPG/JPEG, WebP, AVIF, TGA, KTX2, Basis) and HDR/EXR environment images. Assign maps from the material inspector or drop a texture onto a material slot.
 - **Work with ZIP packs:** inspect archive contents before import, group textures with likely models, and review confidence-ranked smart matches. The matcher considers model/material names, map labels, packed channel hints, and folder context; ambiguous matches can be reviewed or assigned manually.
 - **Edit PBR materials:** base color, normal, roughness, metalness, ambient occlusion, emissive, opacity, displacement, bump, specular, glossiness, and packed ORM slots, alongside material controls.
 - **Tune the look:** environment presets, lighting, shadows, tone mapping, exposure, fog, and optional post effects. The default shadow filter is selected for performance; soft shadows remain available in render settings.
 - **Create effects:** Shader Lab provides GLSL fragment editing, built-in effect presets, uniform controls, validation feedback, blending and transparency settings, and live scene effects.
 - **Add UI to the scene:** create camera-facing billboard labels and GUI elements.
 - **Animate:** imported clips are available in the timeline with play/pause and scrubbing controls.
-- **Capture and export:** Shot Studio supports custom dimensions, aspect presets, supersampling, transparent backgrounds, frame/matte, watermarks, PNG/JPEG/WebP, and four-angle turntables. Export a scene as GLB or save a project document/manifest.
-- **Persist locally:** browser autosave and imported binary assets are stored in IndexedDB on the current device. The downloaded `.atlascene` file contains the scene document and asset manifest; it does not bundle the binary asset payloads. Keep the original source files for moving a project to another browser/device.
+- **Capture and export:** Shot Studio supports custom dimensions, aspect presets, supersampling, transparent backgrounds, frame/matte, watermarks, PNG/JPEG/WebP, and four-angle turntables. Export a scene as GLB, save a compact `.atlascene` document, or create a portable `.atlaszip` bundle with referenced asset bytes.
+- **Persist locally:** browser autosave and imported binary assets are stored in IndexedDB on the current device. `.atlascene` files contain the scene document and asset manifest; `.atlaszip` bundles include the referenced model and texture files for moving a project to another browser/device.
+- **Work faster:** use the searchable command palette (`⌘/Ctrl+K`) for scene, viewport, import/export, and workspace actions. The timeline playhead updates in place while playing, and model thumbnails are queued to avoid bursts of WebGL contexts.
 
 All scene processing happens in the browser. Large files can use substantial memory and GPU resources; practical limits depend on the device, browser, and available memory. ZIP extraction is streamed and CRC-checked, but no web app can load assets larger than the browser/device can support.
 
@@ -46,10 +47,12 @@ All scene processing happens in the browser. Large files can use substantial mem
 | Orbit / pan / zoom | Drag / Shift-drag / scroll |
 | Move / rotate / scale | `W` / `E` / `R` |
 | Frame selection / frame all | `F` / `Shift+F` |
+| Reset camera | `⌘/Ctrl+0` |
 | Toggle snapping | `Shift+S` |
 | Duplicate / delete | `⌘/Ctrl+D` / `Delete` |
 | Undo / redo | `⌘/Ctrl+Z` / `Shift+⌘/Ctrl+Z` |
 | Import / save | `⌘/Ctrl+O` / `⌘/Ctrl+S` |
+| Command palette | `⌘/Ctrl+K` |
 | Play or pause timeline | `Space` |
 | Open shortcuts | `?` |
 

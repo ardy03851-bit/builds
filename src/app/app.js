@@ -4,7 +4,7 @@
  */
 import * as THREE from 'three';
 import { Store, History } from '../core/store.js';
-import { createInitialState, MATERIAL_DEFAULTS, LIGHT_PRESETS, GRID_ENV_THEMES } from '../core/schema.js';
+import { createInitialState, DEFAULT_CAMERA, MATERIAL_DEFAULTS, LIGHT_PRESETS, GRID_ENV_THEMES } from '../core/schema.js';
 import { blobs } from '../core/blobstore.js';
 import { clamp, debounce, uid, isTouchDevice } from '../core/util.js';
 import { basename, extensionOf } from '../core/paths.js';
@@ -27,9 +27,8 @@ import {
   zipReviewDialog, matchReviewDialog, exportDialog, shaderLabDialog, shortcutsDialog,
   texturePickerDialog, welcomeDialog,
 } from '../ui/dialogs.js';
-import { loadTextureBlob } from '../assets/assetLoader.js';
+import { loadTextureBlob, loadAsset } from '../assets/assetLoader.js';
 import { SHADER_PRESETS, PRESET_BY_ID, uniformsFromPreset } from '../core/shaderlib.js';
-import { loadAsset } from '../assets/assetLoader.js';
 import { SLOT_BY_ID } from '../core/slots.js';
 
 export class App {
@@ -44,6 +43,10 @@ export class App {
     };
     this.consoleLines = [];
     this.thumbCache = new Map();
+    this.thumbCacheLimit = 128;
+    this.texturePreviewQueue = [];
+    this.texturePreviewPending = new Map();
+    this.texturePreviewActive = false;
     this.pendingThumb = new Set();
     this.uiState = { collapsedNodes: new Set(), shaderId: null };
     this.touchMode = isTouchDevice();
@@ -149,12 +152,16 @@ export class App {
   }
 
   _initAutosave() {
-    this.store.subscribe(
-      debounce(() => this.io.scheduleAutosave(900), 400),
-      'objects',
-    );
-    this.store.subscribe(debounce(() => this.io.scheduleAutosave(1400), 500), 'materials');
-    this.store.subscribe(debounce(() => this.io.scheduleAutosave(1600), 600), 'environment');
+    const schedule = debounce(() => this.io.scheduleAutosave(900), 450);
+    // Keep asset-only projects and render/camera edits recoverable too. Avoid
+    // subscribing to the whole timeline: playback time can change many times
+    // per second and should not continuously serialize the document.
+    const paths = [
+      'objects', 'assets', 'materials', 'environment', 'render', 'camera',
+      'lighting', 'snap', 'shot', 'meta.name', 'ui.theme', 'timeline.duration',
+      'timeline.loop', 'timeline.speed', 'timeline.tracks',
+    ];
+    for (const path of paths) this.store.subscribe(schedule, path);
   }
 
   _announceReady() {
@@ -163,7 +170,7 @@ export class App {
       try {
         const autosave = await this.io.loadAutosave();
         if (autosave && (autosave.objects?.length || autosave.assets?.length)) {
-          this.toast.show({
+          const restoreToast = this.toast.show({
             kind: 'info',
             title: 'Restore your last session?',
             message: `${autosave.objects?.length || 0} objects · saved ${new Date(autosave.savedAt || Date.now()).toLocaleTimeString()}`,
@@ -174,16 +181,21 @@ export class App {
                 style: { height: '24px', fontSize: '11px' },
                 onClick: async () => {
                   await this.io.applyDocument(autosave, { source: 'autosave', silent: true });
+                  restoreToast?.dismiss();
                   this.toast.success('Session restored');
                 },
               }, 'Restore'),
               h('button.btn', {
                 type: 'button',
                 style: { height: '24px', fontSize: '11px' },
-                onClick: () => this.toast.dismiss(this.lastRestoreToast?.id ?? ''),
+                onClick: async () => {
+                  await this.io.clearAutosave();
+                  restoreToast?.dismiss();
+                },
               }, 'Start fresh'),
             ],
           });
+          this.lastRestoreToast = restoreToast;
         }
       } catch {
         /* ignore */
@@ -205,6 +217,7 @@ export class App {
     on('#btn-redo', 'click', () => this.redo());
     on('#btn-save', 'click', () => this.io.save());
     on('#btn-export', 'click', () => exportDialog(this));
+    on('#btn-command', 'click', () => this.openCommandPalette());
     on('#btn-help', 'click', () => shortcutsDialog(this));
     on('#btn-import-empty', 'click', () => this.importPicker());
     on('#btn-samples', 'click', () => this.loadSampleScene());
@@ -279,7 +292,9 @@ export class App {
       this.store.subscribe(() => this.updateEmptyState(), 'objects'),
       this.store.subscribe(() => this.updateProjectName(), 'meta.name'),
       this.store.subscribe(() => this.refreshUndoButtons(), 'ui.gizmoMode'),
-      this.store.subscribe(() => this.animation.seek(this.store.get('timeline.time', 0)), 'timeline.time'),
+      this.store.subscribe(() => {
+        if (!this.store.get('timeline.playing')) this.animation.seek(this.store.get('timeline.time', 0));
+      }, 'timeline.time'),
       this.store.subscribe(() => this.vfx.sync(), 'objects'),
       this.store.subscribe(() => this.vfx.sync(), 'lighting'),
       this.store.subscribe(() => this.billboards.sync(), 'objects'),
@@ -338,7 +353,7 @@ export class App {
   onFrame(dt) {
     if (this.store.get('timeline.playing')) {
       this.animation.update(dt);
-      this.dock?.panel.invalidate();
+      this.dock?.updatePlayhead(this.animation.elapsed);
     }
     if (this.autoOrbit) {
       this.engine.orbit.autoRotate = true;
@@ -563,6 +578,16 @@ export class App {
     $('#chip-ortho')?.setAttribute('aria-pressed', String(next === 'orthographic'));
   }
 
+  resetCamera() {
+    this.store.set('camera.type', 'perspective');
+    this.engine.initialCameraSet = true;
+    this.engine.applyCamera();
+    this.engine.setCameraPose(DEFAULT_CAMERA.position, DEFAULT_CAMERA.target);
+    this.engine.persistCamera?.();
+    $('#chip-ortho')?.classList.remove('is-active');
+    $('#chip-ortho')?.setAttribute('aria-pressed', 'false');
+  }
+
   setView(view) {
     const orbit = this.engine.orbit;
     const target = orbit.target.clone();
@@ -583,23 +608,30 @@ export class App {
   renameProject() {
     const current = this.store.get('meta.name', 'Untitled Scene');
     const input = h('input.input', { type: 'text', value: current, 'data-autofocus': '' });
-    const api = openModal({
+    const save = () => {
+      const name = input.value.trim();
+      if (!name) {
+        input.value = current;
+        input.focus();
+        return;
+      }
+      this.store.set('meta.name', name);
+      this.history.commit('Rename project');
+      closeModal();
+    };
+    openModal({
       title: 'Rename project',
       body: h('div.u-col.u-gap-2', {}, h('span.prop-label', {}, 'Project name'), input),
       footer: [
         h('button.btn', { type: 'button', onClick: () => closeModal() }, 'Cancel'),
-        h('button.btn.btn-primary', {
-          type: 'button',
-          onClick: () => {
-            this.store.set('meta.name', input.value.trim() || 'Untitled Scene');
-            this.history.commit('Rename project');
-            closeModal();
-          },
-        }, 'Save'),
+        h('button.btn.btn-primary', { type: 'button', onClick: save }, 'Save'),
       ],
     });
-    input.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') api.close();
+    input.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' && !event.isComposing) {
+        event.preventDefault();
+        save();
+      }
     });
   }
 
@@ -611,15 +643,139 @@ export class App {
         { label: 'New scene', icon: 'plus', action: () => this.newScene() },
         { label: 'Open project…', icon: 'upload', action: () => $('#project-input').click() },
         { label: 'Save project', icon: 'download', action: () => this.io.save() },
+        { label: 'Save portable bundle…', icon: 'zip', action: () => this.io.saveBundle() },
         { label: '', separator: true },
         { label: 'Import files…', icon: 'upload', action: () => this.importPicker() },
         { label: 'Export…', icon: 'camera', action: () => exportDialog(this) },
         { label: '', separator: true },
         { label: 'Shortcuts', icon: 'info', action: () => shortcutsDialog(this) },
         { label: 'Welcome tour', icon: 'sparkle', action: () => welcomeDialog(this) },
+        { label: 'Command palette…', icon: 'search', action: () => this.openCommandPalette() },
         { label: 'Clean unused assets', icon: 'trash', action: () => this.io.garbageCollect() },
       ],
     );
+  }
+
+  openCommandPalette() {
+    const input = h('input.input', {
+      type: 'search',
+      placeholder: 'Search commands, actions and tools…',
+      'aria-label': 'Search commands',
+      'data-autofocus': '',
+    });
+    const results = h('div.command-list', { role: 'listbox', 'aria-label': 'Commands' });
+    const modifier = /Mac|iPhone|iPad/i.test(navigator.platform || navigator.userAgent) ? '⌘' : 'Ctrl';
+    const commands = [
+      { label: 'Save project', category: 'Project', shortcut: `${modifier} S`, icon: 'download', keywords: 'atlascene download', action: () => this.io.save() },
+      { label: 'Save portable bundle', category: 'Project', icon: 'zip', keywords: 'atlaszip zip assets backup', action: () => this.io.saveBundle() },
+      { label: 'Open project', category: 'Project', icon: 'upload', keywords: 'load atlascene atlaszip', action: () => $('#project-input').click() },
+      { label: 'Import files', category: 'Project', shortcut: `${modifier} O`, icon: 'upload', keywords: 'model texture zip asset', action: () => this.importPicker() },
+      { label: 'Export scene or screenshot', category: 'Project', shortcut: `${modifier} E`, icon: 'camera', keywords: 'glb png render', action: () => exportDialog(this) },
+      { label: 'Add cube', category: 'Create', icon: 'cube', keywords: 'primitive box mesh', action: () => this.scene.addPrimitive('cube') },
+      { label: 'Add sphere', category: 'Create', icon: 'cube', keywords: 'primitive ball mesh', action: () => this.scene.addPrimitive('sphere') },
+      { label: 'Add empty group', category: 'Create', icon: 'group', keywords: 'parent folder', action: () => this.scene.addGroup() },
+      { label: 'Group selection', category: 'Scene', icon: 'group', keywords: 'parent combine organize', action: () => this.scene.groupSelection() },
+      { label: 'Ungroup selection', category: 'Scene', icon: 'group', keywords: 'ungroup separate parent', action: () => this.scene.ungroup() },
+      { label: 'Add point light', category: 'Create', icon: 'light', keywords: 'lighting lamp', action: () => this.scene.addLight('point') },
+      { label: 'Add billboard label', category: 'Create', icon: 'billboard', keywords: 'text annotation gui', action: () => this.scene.addBillboard({ text: 'Label' }) },
+      { label: 'Duplicate selection', category: 'Scene', shortcut: `${modifier} D`, icon: 'copy', keywords: 'clone copy', action: () => this.scene.duplicate() },
+      { label: 'Delete selection', category: 'Scene', icon: 'trash', keywords: 'remove erase', action: () => this.scene.delete() },
+      { label: 'Frame selection', category: 'Viewport', shortcut: 'F', icon: 'frame', keywords: 'focus zoom camera', action: () => this.engine.frameSelection() },
+      { label: 'Frame all objects', category: 'Viewport', shortcut: '⇧ F', icon: 'frame', keywords: 'focus zoom camera', action: () => this.engine.frameAll() },
+      { label: 'Reset camera', category: 'Viewport', shortcut: `${modifier} 0`, icon: 'reset', keywords: 'home default view', action: () => this.resetCamera() },
+      { label: 'Toggle theme', category: 'Workspace', shortcut: `${modifier} J`, icon: 'sparkle', keywords: 'dark light appearance', action: () => this.toggleTheme() },
+      { label: 'Toggle touch mode', category: 'Workspace', icon: 'move', keywords: 'tablet ipad larger controls', action: () => this.toggleTouchMode() },
+      { label: 'Toggle stats overlay', category: 'Workspace', shortcut: `${modifier} I`, icon: 'info', keywords: 'fps performance diagnostics', action: () => this.toggleStats() },
+      { label: 'Toggle orthographic camera', category: 'Viewport', icon: 'camera', keywords: 'perspective parallel', action: () => this.toggleOrtho() },
+      { label: 'Toggle grid', category: 'Viewport', icon: 'grid', keywords: 'floor lines', action: () => this.store.set('environment.showGrid', !this.store.get('environment.showGrid')) },
+      { label: 'Toggle background', category: 'Viewport', icon: 'sparkle', keywords: 'environment backdrop', action: () => this.store.set('environment.showBackground', !this.store.get('environment.showBackground')) },
+      { label: 'Open Assets panel', category: 'Workspace', icon: 'texture', keywords: 'library files', action: () => $('[data-left-tab="assets"]')?.click() },
+      { label: 'Open Scene hierarchy', category: 'Workspace', icon: 'group', keywords: 'tree objects', action: () => $('[data-left-tab="scene"]')?.click() },
+      { label: 'Open Materials panel', category: 'Workspace', icon: 'layers', keywords: 'shader surface', action: () => $('[data-left-tab="materials"]')?.click() },
+      { label: 'Open Lighting controls', category: 'Workspace', icon: 'light', keywords: 'render illumination', action: () => $('[data-right-tab="lighting"]')?.click() },
+      { label: 'Open Render settings', category: 'Workspace', icon: 'sparkle', keywords: 'effects quality', action: () => $('[data-right-tab="render"]')?.click() },
+      { label: 'Open timeline', category: 'Workspace', icon: 'film', keywords: 'animation playback', action: () => $('[data-bottom-tab="timeline"]')?.click() },
+      { label: 'Keyboard shortcuts', category: 'Help', shortcut: '?', icon: 'info', keywords: 'help guide', action: () => shortcutsDialog(this) },
+    ];
+
+    let filtered = [];
+    let activeIndex = 0;
+    const run = (command) => {
+      if (!command) return;
+      modal?.close();
+      try {
+        const result = command.action();
+        result?.catch?.((error) => this.toast.error('Command failed', error.message));
+      } catch (error) {
+        this.toast.error('Command failed', error.message);
+      }
+    };
+    const syncActive = () => {
+      const buttons = results.querySelectorAll('.command-option');
+      buttons.forEach((button, index) => {
+        button.classList.toggle('is-active', index === activeIndex);
+        button.setAttribute('aria-selected', String(index === activeIndex));
+      });
+      buttons[activeIndex]?.scrollIntoView({ block: 'nearest' });
+    };
+    const renderResults = () => {
+      const query = input.value.trim().toLowerCase();
+      filtered = commands.filter((command) => (
+        `${command.label} ${command.category} ${command.keywords || ''}`.toLowerCase().includes(query)
+      ));
+      activeIndex = 0;
+      clear(results);
+      if (!filtered.length) {
+        results.appendChild(h('div.command-empty', {}, 'No commands match that search.'));
+        return;
+      }
+      filtered.forEach((command, index) => {
+        results.appendChild(h(
+          `button.command-option${index === activeIndex ? '.is-active' : ''}`,
+          {
+            type: 'button',
+            role: 'option',
+            'aria-selected': String(index === activeIndex),
+            onMouseEnter: () => { activeIndex = index; syncActive(); },
+            onClick: () => run(command),
+          },
+          h('span.command-icon', {}, icon(command.icon, 15)),
+          h('span.command-copy', {},
+            h('span.command-label', {}, command.label),
+            h('span.command-category', {}, command.category),
+          ),
+          command.shortcut ? h('kbd.command-shortcut', {}, command.shortcut) : null,
+        ));
+      });
+    };
+
+    input.addEventListener('input', renderResults);
+    input.addEventListener('keydown', (event) => {
+      if (event.key === 'ArrowDown' && filtered.length) {
+        event.preventDefault();
+        activeIndex = (activeIndex + 1) % filtered.length;
+        syncActive();
+      } else if (event.key === 'ArrowUp' && filtered.length) {
+        event.preventDefault();
+        activeIndex = (activeIndex - 1 + filtered.length) % filtered.length;
+        syncActive();
+      } else if (event.key === 'Enter') {
+        event.preventDefault();
+        run(filtered[activeIndex]);
+      }
+    });
+    renderResults();
+    const modal = openModal({
+      title: 'Command palette',
+      subtitle: 'Search and run an action',
+      className: 'command-modal',
+      body: h('div.command-palette', {},
+        h('div.command-search', {}, icon('search', 14), input),
+        results,
+        h('div.command-hint', {}, '↑ ↓ to navigate · Enter to run · Esc to close'),
+      ),
+    });
+    return modal;
   }
 
   async newScene() {
@@ -652,8 +808,8 @@ export class App {
     const input = $('#file-input');
     input.value = '';
     input.accept = accept || (texturesOnly
-      ? '.png,.jpg,.jpeg,.webp,.avif,.ktx2,.tga'
-      : '.glb,.gltf,.fbx,.obj,.mtl,.stl,.ply,.dae,.3mf,.bin,.png,.jpg,.jpeg,.webp,.avif,.ktx2,.hdr,.exr,.tga,.zip,.mp3,.ogg,.wav');
+      ? '.png,.jpg,.jpeg,.webp,.avif,.ktx2,.basis,.tga'
+      : '.glb,.gltf,.fbx,.obj,.mtl,.stl,.ply,.dae,.3mf,.bin,.png,.jpg,.jpeg,.webp,.avif,.ktx2,.basis,.hdr,.exr,.tga,.zip,.atlaszip,.atlascene,.mp3,.ogg,.wav');
     input.click();
   }
 
@@ -771,6 +927,11 @@ export class App {
       }
       if (typing) return;
 
+      if (mod && event.key.toLowerCase() === 'k') {
+        event.preventDefault();
+        this.openCommandPalette();
+        return;
+      }
       if (event.key === '?') {
         event.preventDefault();
         shortcutsDialog(this);
@@ -815,7 +976,7 @@ export class App {
       }
       if (mod && event.key === '0') {
         event.preventDefault();
-        this.engine.frameAll();
+        this.resetCamera();
         return;
       }
       switch (event.key.toLowerCase()) {
@@ -934,24 +1095,81 @@ export class App {
   /* assets & materials                                               */
   /* ================================================================ */
 
-  async texturePreview(asset) {
+  getThumbnail(key) {
+    const value = this.thumbCache.get(key);
+    if (value) {
+      this.thumbCache.delete(key);
+      this.thumbCache.set(key, value);
+    }
+    return value || null;
+  }
+
+  cacheThumbnail(key, value) {
+    if (!value) return null;
+    this.thumbCache.delete(key);
+    this.thumbCache.set(key, value);
+    while (this.thumbCache.size > this.thumbCacheLimit) {
+      this.thumbCache.delete(this.thumbCache.keys().next().value);
+    }
+    return value;
+  }
+
+  texturePreview(asset) {
+    const key = asset.blobId || asset.path || asset.name;
+    const cached = this.getThumbnail(key);
+    if (cached) return Promise.resolve(cached);
+    const pending = this.texturePreviewPending.get(key);
+    if (pending) return pending;
+
+    let resolve;
+    const promise = new Promise((done) => { resolve = done; });
+    this.texturePreviewPending.set(key, promise);
+    this.texturePreviewQueue.push({ asset, key, resolve });
+    this.drainTexturePreviews();
+    return promise;
+  }
+
+  async drainTexturePreviews() {
+    if (this.texturePreviewActive) return;
+    this.texturePreviewActive = true;
     try {
-      const blob = asset.blobId ? await blobs.get(asset.blobId) : null;
-      if (!blob) return null;
-      const bitmap = await createImageBitmap(blob).catch(() => null);
-      if (!bitmap) return null;
+      while (this.texturePreviewQueue.length) {
+        const item = this.texturePreviewQueue.shift();
+        try {
+          const url = await this.renderTexturePreview(item.asset);
+          this.cacheThumbnail(item.key, url);
+          item.resolve(url);
+        } catch {
+          item.resolve(null);
+        } finally {
+          this.texturePreviewPending.delete(item.key);
+        }
+        // Decode a single texture at a time and yield between large images.
+        if (this.texturePreviewQueue.length) await new Promise((resolve) => requestAnimationFrame(resolve));
+      }
+    } finally {
+      this.texturePreviewActive = false;
+    }
+  }
+
+  async renderTexturePreview(asset) {
+    const blob = asset.blobId ? await blobs.get(asset.blobId) : null;
+    if (!blob) return null;
+    const bitmap = await createImageBitmap(blob).catch(() => null);
+    if (!bitmap) return null;
+    try {
       const size = 160;
       const canvas = document.createElement('canvas');
       const ratio = Math.min(size / bitmap.width, size / bitmap.height);
       canvas.width = Math.max(1, Math.round(bitmap.width * ratio));
       canvas.height = Math.max(1, Math.round(bitmap.height * ratio));
       const ctx = canvas.getContext('2d');
+      if (!ctx) return null;
       ctx.imageSmoothingQuality = 'high';
       ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
-      bitmap.close?.();
       return canvas.toDataURL('image/png');
-    } catch {
-      return null;
+    } finally {
+      bitmap.close?.();
     }
   }
 

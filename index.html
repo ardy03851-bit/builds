@@ -107,6 +107,9 @@
         </div>
 
         <div class="topbar-right">
+          <button class="icon-btn" id="btn-command" type="button" title="Command palette (Ctrl/⌘K)" aria-label="Search and run commands">
+            <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><circle cx="6.9" cy="6.9" r="4.3" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="m10.2 10.2 3.2 3.2" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+          </button>
           <div class="btn-group" role="group" aria-label="History">
             <button class="icon-btn" id="btn-undo" title="Undo (⌘Z)" aria-label="Undo" disabled>
               <svg viewBox="0 0 16 16" width="16" height="16"><path d="M4.5 3L1 6.5 4.5 10V7.5h4a3 3 0 010 6H6v1.5h2.5a4.5 4.5 0 000-9h-4z" fill="currentColor"/></svg>
@@ -290,8 +293,8 @@
     </div>
 
     <!-- hidden file inputs -->
-    <input type="file" id="file-input" multiple hidden accept=".glb,.gltf,.fbx,.obj,.mtl,.stl,.ply,.dae,.3mf,.bin,.png,.jpg,.jpeg,.webp,.avif,.ktx2,.hdr,.exr,.tga,.zip,.atlascene,.mp3,.ogg,.wav" />
-    <input type="file" id="project-input" hidden accept=".atlascene,.json" />
+    <input type="file" id="file-input" multiple hidden accept=".glb,.gltf,.fbx,.obj,.mtl,.stl,.ply,.dae,.3mf,.bin,.png,.jpg,.jpeg,.webp,.avif,.ktx2,.basis,.hdr,.exr,.tga,.zip,.atlaszip,.atlascene,.mp3,.ogg,.wav" />
+    <input type="file" id="project-input" hidden accept=".atlascene,.atlaszip,.json" />
 
     <div id="modal-root" class="modal-root" hidden></div>
     <div id="context-menu" class="context-menu glass" role="menu" hidden></div>
