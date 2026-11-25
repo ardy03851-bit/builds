@@ -6,6 +6,8 @@ import { SCHEMA_VERSION, createInitialState } from '../core/schema.js';
 import { blobs } from '../core/blobstore.js';
 import { deepClone, slug } from '../core/util.js';
 import { triggerDownload, stamp } from './shots.js';
+import { extensionOf } from '../core/paths.js';
+import { createProjectBundle, readProjectBundle } from '../core/projectBundle.js';
 
 export class ProjectIO {
   constructor(app) {
@@ -59,6 +61,31 @@ export class ProjectIO {
     return name;
   }
 
+  /** Portable ZIP with the document and every referenced asset blob. */
+  async saveBundle() {
+    const progress = this.app.toast.progress('Packing portable project…');
+    try {
+      const document = this.serialise();
+      const blob = await createProjectBundle(document, (id) => blobs.get(id), {
+        onProgress: ({ loaded, total, path }) => {
+          const percent = total ? (loaded / total) * 100 : 0;
+          progress.progress(percent, path ? `${Math.round(percent)}% · ${path.split('/').pop()}` : 'Writing files…');
+        },
+      });
+      const name = `${slug(this.store.get('meta.name', 'scene'), 'scene')}-${stamp()}.atlaszip`;
+      triggerDownload(blob, name);
+      progress.dismiss();
+      this.app.log('success', `Portable project saved as ${name}`);
+      this.app.toast.success('Portable project saved', name);
+      return name;
+    } catch (error) {
+      progress.dismiss();
+      this.app.toast.error('Could not save project bundle', error.message);
+      this.app.log('error', `Project bundle failed: ${error.message}`);
+      return null;
+    }
+  }
+
   /** Writes to IndexedDB so a refresh keeps your work. */
   async autosave() {
     try {
@@ -86,15 +113,39 @@ export class ProjectIO {
   }
 
   async openProjectFile(file) {
+    let progress = null;
     try {
-      const text = await file.text();
-      const doc = JSON.parse(text);
-      await this.applyDocument(doc, { source: file.name });
+      if (extensionOf(file.name) === 'atlaszip') {
+        progress = this.app.toast.progress('Checking portable project…');
+        const bundle = await readProjectBundle(file, {
+          onProgress: ({ loaded, total }) => {
+            progress.progress(total ? (loaded / total) * 100 : 0, `${loaded}/${total} assets verified`);
+          },
+        });
+        let stored = 0;
+        for (const { id, blob } of bundle.entries) {
+          // Keep the bundle's content-addressed identifiers stable so existing
+          // model and material references reconnect without rewriting JSON.
+          await blobs.put(id, blob);
+          stored += 1;
+          progress.progress(bundle.entries.length ? (stored / bundle.entries.length) * 100 : 100, `${stored}/${bundle.entries.length} assets stored`);
+        }
+        progress.progress(100, 'Restoring scene…');
+        await this.applyDocument(bundle.document, { source: file.name });
+        progress.dismiss();
+      } else {
+        const text = await file.text();
+        const doc = JSON.parse(text);
+        await this.applyDocument(doc, { source: file.name });
+      }
       this.app.toast.success('Project opened', file.name);
+      return true;
     } catch (err) {
+      progress?.dismiss();
       console.error(err);
       this.app.toast.error('Could not open project', err.message);
       this.app.log('error', `Project load failed: ${err.message}`);
+      return false;
     }
   }
 
@@ -113,7 +164,7 @@ export class ProjectIO {
       ...base,
       ...doc,
       assets: doc.assets || [],
-      objects: doc.objects || [],
+      objects: normalizeHierarchy(doc.objects || []),
       materials: doc.materials || {},
       selection: [],
       timeline: { ...base.timeline, ...(doc.timeline || {}), playing: false },
@@ -181,6 +232,32 @@ export class ProjectIO {
   clonedState() {
     return deepClone(this.serialise());
   }
+}
+
+/** Repairs missing-parent references and breaks corrupt hierarchy cycles. */
+export function normalizeHierarchy(objects) {
+  const normalized = objects.map((node) => ({ ...node, parentId: node.parentId || null }));
+  const byId = new Map(normalized.map((node) => [node.id, node]));
+
+  for (const node of normalized) {
+    if (node.parentId && !byId.has(node.parentId)) node.parentId = null;
+  }
+  for (const node of normalized) {
+    const path = [];
+    const visited = new Set();
+    let cursor = node.id;
+    while (cursor && byId.has(cursor)) {
+      if (visited.has(cursor)) {
+        const edge = byId.get(path[path.length - 1]);
+        if (edge) edge.parentId = null;
+        break;
+      }
+      visited.add(cursor);
+      path.push(cursor);
+      cursor = byId.get(cursor).parentId;
+    }
+  }
+  return normalized;
 }
 
 /** Save helpers shared with keyboard shortcuts. */

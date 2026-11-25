@@ -415,13 +415,13 @@ export class RightSidebar {
 
   textureSlot(materialId, record, slot) {
     const tex = record.textures?.[slot.id];
-    const thumb = tex ? this.app.thumbCache.get(tex.blobId) : null;
+    const thumb = tex ? this.app.getThumbnail(tex.blobId) : null;
     if (tex && !thumb && !this.app.pendingThumb.has(tex.blobId)) {
       this.app.pendingThumb.add(tex.blobId);
       this.app.texturePreview({ blobId: tex.blobId, name: tex.name }).then((url) => {
         this.app.pendingThumb.delete(tex.blobId);
         if (url) {
-          this.app.thumbCache.set(tex.blobId, url);
+          this.app.cacheThumbnail(tex.blobId, url);
           this.panel.invalidate();
         }
       });

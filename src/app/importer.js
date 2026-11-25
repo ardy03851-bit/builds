@@ -44,8 +44,8 @@ export class Importer {
       path: normalizePath(file.webkitRelativePath || file.relativePath || file.name),
     }));
 
-    const zips = entries.filter((e) => extensionOf(e.path) === 'zip' || extensionOf(e.path) === 'atlaszip');
-    const projects = entries.filter((e) => extensionOf(e.path) === 'atlascene');
+    const projects = entries.filter((e) => ['atlascene', 'atlaszip'].includes(extensionOf(e.path)));
+    const zips = entries.filter((e) => extensionOf(e.path) === 'zip');
     const rest = entries.filter((e) => !zips.includes(e) && !projects.includes(e));
 
     if (projects.length) {

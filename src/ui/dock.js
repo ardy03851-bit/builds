@@ -23,13 +23,28 @@ export class Dock {
   mount() {
     this.panel.mount();
     const invalidate = () => this.panel.invalidate();
-    this.app.store.subscribe(invalidate, 'timeline');
+    // Rebuilding the entire timeline on every playhead tick used to recreate
+    // every lane and transport control up to 50 times per second. Only repaint
+    // for structural/control changes; move the playhead in place instead.
+    for (const path of ['timeline.playing', 'timeline.loop', 'timeline.speed', 'timeline.duration', 'timeline.tracks']) {
+      this.app.store.subscribe(invalidate, path);
+    }
+    this.app.store.subscribe(() => this.updatePlayhead(), 'timeline.time');
     this.app.store.subscribe(invalidate, 'ui.bottomTab');
     this.app.store.subscribe(invalidate, 'selection');
     this.app.store.subscribe(invalidate, 'objects');
     this.app.store.subscribe(invalidate, 'lighting');
     this.app.events.on('console:changed', invalidate);
     this.app.events.on('shader:changed', invalidate);
+  }
+
+  updatePlayhead(value = this.app.store.get('timeline.time', 0)) {
+    const duration = Math.max(1, this.app.store.get('timeline.duration', 12) || 12);
+    const time = clamp(value ?? 0, 0, duration);
+    const playhead = this.root.querySelector('.playhead');
+    if (playhead) playhead.style.left = `${(time / duration) * 100}%`;
+    const readout = this.root.querySelector('.transport-time');
+    if (readout) readout.textContent = formatTime(time);
   }
 
   render() {

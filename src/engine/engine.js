@@ -395,6 +395,8 @@ export class Engine {
     const objects = this.store.get('objects', []);
     const seen = new Set();
 
+    // Create every transform group first so a child may safely appear before
+    // its parent in imported or manually reordered scene data.
     for (const node of objects) {
       seen.add(node.id);
       let group = this.objectMap.get(node.id);
@@ -405,9 +407,20 @@ export class Engine {
         this.objectMap.set(node.id, group);
         this.nodeByObject.set(group, node.id);
       }
-      // parent re-attach
-      const parent = node.parentId ? this.objectMap.get(node.parentId) : this.root;
-      const target = parent || this.root;
+    }
+
+    for (const node of objects) {
+      const group = this.objectMap.get(node.id);
+      const parent = node.parentId ? this.objectMap.get(node.parentId) : null;
+      let target = parent || this.root;
+      // A malformed project can contain a parent cycle. Break that edge at the
+      // root instead of creating an invalid Three.js object hierarchy.
+      for (let cursor = target; cursor; cursor = cursor.parent) {
+        if (cursor === group) {
+          target = this.root;
+          break;
+        }
+      }
       if (group.parent !== target) target.add(group);
 
       applyTransform(group, node);
@@ -428,6 +441,7 @@ export class Engine {
         group.parent?.remove(group);
         disposeTree(group);
         this.objectMap.delete(id);
+        this.nodeByObject.delete(group);
       }
     }
 

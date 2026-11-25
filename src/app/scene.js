@@ -201,6 +201,111 @@ export class SceneManager {
     return node;
   }
 
+  /** Creates an empty transformable group at the world origin. */
+  addGroup() {
+    const node = createObjectNode({
+      name: uniqueName(this.store.get('objects', []), 'Group'),
+      kind: 'group',
+    });
+    this.store.batch(() => {
+      this.store.push('objects', node);
+      this.store.set('selection', [node.id]);
+    });
+    this.engine.syncFromStore();
+    this.engine.syncSelection();
+    this.app.history.commit('Add group');
+    this.app.emit('scene:changed');
+    return node;
+  }
+
+  /** Groups the current selection without changing its world-space pose. */
+  groupSelection() {
+    const objects = this.store.get('objects', []);
+    const selected = new Set(this.store.get('selection', []));
+    if (!selected.size) return this.addGroup();
+
+    // If both a parent and its child are selected, moving the parent is enough.
+    const topLevel = objects.filter((node) => {
+      if (!selected.has(node.id)) return false;
+      let parentId = node.parentId;
+      const visited = new Set();
+      while (parentId && !visited.has(parentId)) {
+        if (selected.has(parentId)) return false;
+        visited.add(parentId);
+        parentId = objects.find((candidate) => candidate.id === parentId)?.parentId || null;
+      }
+      return true;
+    });
+    if (!topLevel.length) return null;
+
+    const transforms = new Map();
+    for (const node of topLevel) {
+      const object = this.engine.objectMap.get(node.id);
+      if (!object) continue;
+      object.updateWorldMatrix(true, false);
+      transforms.set(node.id, matrixTransform(object.matrixWorld));
+    }
+    const group = createObjectNode({
+      name: uniqueName(objects, 'Group'),
+      kind: 'group',
+    });
+    const groupedIds = new Set(transforms.keys());
+    const next = objects.map((node) => {
+      if (!groupedIds.has(node.id)) return node;
+      return { ...node, ...transforms.get(node.id), parentId: group.id };
+    });
+    next.push(group);
+    this.store.batch(() => {
+      this.store.set('objects', next);
+      this.store.set('selection', [group.id]);
+    });
+    this.engine.syncFromStore();
+    this.engine.syncSelection();
+    this.app.history.commit('Group selection');
+    this.app.emit('scene:changed');
+    return group;
+  }
+
+  /** Ungroups selected groups while preserving child world transforms. */
+  ungroup(ids = null) {
+    const selection = ids ? [].concat(ids) : this.store.get('selection', []);
+    const objects = this.store.get('objects', []);
+    const groups = objects.filter((node) => selection.includes(node.id) && node.kind === 'group');
+    if (!groups.length) return false;
+
+    const groupIds = new Set(groups.map((node) => node.id));
+    const childTransforms = new Map();
+    for (const node of objects) {
+      if (!groupIds.has(node.parentId)) continue;
+      const object = this.engine.objectMap.get(node.id);
+      if (!object) continue;
+      object.updateWorldMatrix(true, false);
+      const group = groups.find((candidate) => candidate.id === node.parentId);
+      let parentId = group.parentId || null;
+      const visited = new Set();
+      while (parentId && groupIds.has(parentId) && !visited.has(parentId)) {
+        visited.add(parentId);
+        parentId = objects.find((candidate) => candidate.id === parentId)?.parentId || null;
+      }
+      const transform = localTransformForParent(object, parentId, this.engine);
+      if (transform) childTransforms.set(node.id, { ...transform, parentId });
+    }
+
+    const children = [...childTransforms.keys()];
+    const next = objects
+      .filter((node) => !groupIds.has(node.id))
+      .map((node) => childTransforms.has(node.id) ? { ...node, ...childTransforms.get(node.id) } : node);
+    this.store.batch(() => {
+      this.store.set('objects', next);
+      this.store.set('selection', children);
+    });
+    this.engine.syncFromStore();
+    this.engine.syncSelection();
+    this.app.history.commit('Ungroup');
+    this.app.emit('scene:changed');
+    return true;
+  }
+
   /* -------------------------------------------------------------- */
 
   select(ids, { additive = false } = {}) {
@@ -291,26 +396,35 @@ export class SceneManager {
     for (const id of set) {
       this.app.animation.unregister(id);
       this.nodeObjects.delete(id);
-      this.app.billboards.sync();
     }
+    this.app.billboards.sync();
     this.engine.syncFromStore();
     this.app.history.commit('Delete');
     this.app.emit('scene:changed');
   }
 
   setParent(childId, parentId) {
-    if (childId === parentId) return;
-    // prevent cycles
-    let cursor = parentId;
     const objects = this.store.get('objects', []);
-    while (cursor) {
+    const child = objects.find((node) => node.id === childId);
+    if (!child || childId === parentId) return;
+    const parent = parentId ? objects.find((node) => node.id === parentId) : null;
+    if (parentId && !parent) return;
+
+    // Prevent cycles before touching the live scene graph.
+    let cursor = parentId;
+    const visited = new Set();
+    while (cursor && !visited.has(cursor)) {
       if (cursor === childId) return;
-      cursor = objects.find((o) => o.id === cursor)?.parentId || null;
+      visited.add(cursor);
+      cursor = objects.find((node) => node.id === cursor)?.parentId || null;
     }
-    this.store.update('objects', (list) =>
-      list.map((o) => (o.id === childId ? { ...o, parentId: parentId || null } : o)),
-    );
+
+    const transform = localTransformForParent(this.engine.objectMap.get(childId), parentId, this.engine);
+    this.store.update('objects', (list) => list.map((node) => (
+      node.id === childId ? { ...node, ...(transform || {}), parentId: parentId || null } : node
+    )));
     this.engine.syncFromStore();
+    this.engine.syncSelection();
     this.app.history.commit('Reparent');
     this.app.emit('scene:changed');
   }
@@ -320,6 +434,7 @@ export class SceneManager {
       list.map((o) => (o.id === nodeId ? { ...o, visible: o.visible === false } : o)),
     );
     this.engine.syncFromStore();
+    this.app.history.commit('Toggle visibility');
     this.app.emit('scene:changed');
   }
 
@@ -328,6 +443,8 @@ export class SceneManager {
       list.map((o) => (o.id === nodeId ? { ...o, locked: !o.locked } : o)),
     );
     this.engine.syncFromStore();
+    this.engine.syncSelection();
+    this.app.history.commit('Toggle lock');
     this.app.emit('scene:changed');
   }
 
@@ -389,19 +506,10 @@ export class SceneManager {
 
   /** Builds a GLB of the whole scene (without helpers/gizmos). */
   async exportGLB({ binary = true } = {}) {
-    const root = new THREE.Group();
+    // Clone the live user-content root so nested groups, lights, visibility and
+    // parent transforms survive export exactly as they appear in the scene.
+    const root = this.engine.root.clone(true);
     root.name = slug(this.store.get('meta.name', 'scene'), 'scene');
-    for (const node of this.store.get('objects', [])) {
-      if (node.parentId) continue;
-      const object = this.nodeObjects.get(node.id);
-      if (!object) continue;
-      const clone = object.clone(true);
-      clone.position.fromArray(node.position);
-      clone.rotation.set(...node.rotation);
-      clone.scale.fromArray(node.scale);
-      clone.visible = node.visible !== false;
-      root.add(clone);
-    }
     if (!root.children.length) throw new Error('There is nothing in the scene to export yet.');
 
     const exporter = new GLTFExporter();
@@ -431,6 +539,31 @@ export class SceneManager {
     this.engine.transform.detach();
     this.app.billboards.sync();
   }
+}
+
+function matrixTransform(matrix) {
+  const position = new THREE.Vector3();
+  const quaternion = new THREE.Quaternion();
+  const scale = new THREE.Vector3();
+  matrix.decompose(position, quaternion, scale);
+  const rotation = new THREE.Euler().setFromQuaternion(quaternion, 'XYZ');
+  return {
+    position: position.toArray(),
+    rotation: [rotation.x, rotation.y, rotation.z],
+    scale: scale.toArray(),
+  };
+}
+
+function localTransformForParent(object, parentId, engine) {
+  if (!object) return null;
+  object.updateWorldMatrix(true, false);
+  const local = object.matrixWorld.clone();
+  const parent = parentId ? engine.objectMap.get(parentId) : engine.root;
+  if (parent) {
+    parent.updateWorldMatrix(true, false);
+    local.premultiply(new THREE.Matrix4().copy(parent.matrixWorld).invert());
+  }
+  return matrixTransform(local);
 }
 
 function createPrimitiveGeometry(kind) {

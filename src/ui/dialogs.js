@@ -510,6 +510,7 @@ export function shaderLabDialog(app, { shaderId = null, fresh = false } = {}) {
 /* ================================================================== */
 
 export function shortcutsDialog(app) {
+  const modifier = /Mac|iPhone|iPad/i.test(navigator.platform || navigator.userAgent) ? '⌘' : 'Ctrl';
   const groups = [
     {
       title: 'Viewport',
@@ -519,7 +520,7 @@ export function shortcutsDialog(app) {
         ['Zoom', ['Scroll']],
         ['Frame selection', ['F']],
         ['Frame all', ['⇧', 'F']],
-        ['Reset camera', ['⌘', '0']],
+        ['Reset camera', [modifier, '0']],
       ],
     },
     {
@@ -530,19 +531,20 @@ export function shortcutsDialog(app) {
         ['Scale', ['R']],
         ['World / local axis', ['X']],
         ['Snap toggle', ['⇧', 'S']],
-        ['Duplicate', ['⌘', 'D']],
+        ['Duplicate', [modifier, 'D']],
         ['Delete', ['Del']],
       ],
     },
     {
       title: 'Project',
       items: [
-        ['Save project', ['⌘', 'S']],
-        ['Export screenshot', ['⇧', '⌘', 'E']],
-        ['Undo', ['⌘', 'Z']],
-        ['Redo', ['⇧', '⌘', 'Z']],
-        ['Import files', ['⌘', 'O']],
-        ['Toggle theme', ['⌘', 'J']],
+        ['Save project', [modifier, 'S']],
+        ['Export screenshot', ['⇧', modifier, 'E']],
+        ['Undo', [modifier, 'Z']],
+        ['Redo', ['⇧', modifier, 'Z']],
+        ['Import files', [modifier, 'O']],
+        ['Toggle theme', [modifier, 'J']],
+        ['Command palette', [modifier, 'K']],
       ],
     },
     {
@@ -550,7 +552,7 @@ export function shortcutsDialog(app) {
       items: [
         ['Play / pause', ['Space']],
         ['Step frame', ['←', '→']],
-        ['Toggle stats', ['⌘', 'I']],
+        ['Toggle stats', [modifier, 'I']],
         ['Shortcut sheet', ['?']],
       ],
     },
@@ -588,13 +590,13 @@ export function texturePickerDialog(app, { materialId, slotId, onPick }) {
   }
   const grid = h('div.asset-grid', { style: { gridTemplateColumns: 'repeat(auto-fill, minmax(96px, 1fr))' } },
     textures.map((tex) => {
-      const thumb = app.thumbCache.get(tex.blobId);
+      const thumb = app.getThumbnail(tex.blobId);
       if (!thumb && !app.pendingThumb.has(tex.blobId)) {
         app.pendingThumb.add(tex.blobId);
         app.texturePreview(tex).then((url) => {
           app.pendingThumb.delete(tex.blobId);
           if (url) {
-            app.thumbCache.set(tex.blobId, url);
+            app.cacheThumbnail(tex.blobId, url);
             app.ui.refreshModal?.();
           }
         });

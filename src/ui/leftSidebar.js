@@ -16,6 +16,8 @@ export class LeftSidebar {
     this.panel = new Panel(this.root, () => this.render());
     this.dragPayload = null;
     this.pendingThumbs = new Set();
+    this.thumbQueue = [];
+    this.thumbQueueActive = false;
     this.unsubs = [];
   }
 
@@ -232,14 +234,14 @@ export class LeftSidebar {
 
   thumbnailFor(asset) {
     if (asset.kind === 'texture') {
-      const cached = this.app.thumbCache.get(asset.blobId);
+      const cached = this.app.getThumbnail(asset.blobId);
       if (cached) return cached;
       if (!this.pendingThumbs.has(asset.blobId)) {
         this.pendingThumbs.add(asset.blobId);
         this.app.texturePreview(asset).then((url) => {
           this.pendingThumbs.delete(asset.blobId);
           if (url) {
-            this.app.thumbCache.set(asset.blobId, url);
+            this.app.cacheThumbnail(asset.blobId, url);
             this.panel.invalidate();
           }
         });
@@ -247,7 +249,7 @@ export class LeftSidebar {
       return null;
     }
     if (asset.kind === 'model') {
-      const cached = this.app.thumbCache.get(asset.id);
+      const cached = this.app.getThumbnail(asset.id);
       if (cached) return cached;
       if (!this.pendingThumbs.has(asset.id)) {
         this.pendingThumbs.add(asset.id);
@@ -259,15 +261,29 @@ export class LeftSidebar {
   }
 
   async renderModelThumb(asset) {
+    this.thumbQueue.push(asset);
+    if (this.thumbQueueActive) return;
+    this.thumbQueueActive = true;
     try {
-      const object = this.app.scene.loadedObjects.get(asset.id);
-      if (!object) return;
-      const url = thumbnailFor(object, { size: 160 });
-      this.app.thumbCache.set(asset.id, url);
-      this.pendingThumbs.delete(asset.id);
-      this.panel.invalidate();
-    } catch {
-      this.pendingThumbs.delete(asset.id);
+      while (this.thumbQueue.length) {
+        const next = this.thumbQueue.shift();
+        try {
+          const object = this.app.scene.loadedObjects.get(next.id);
+          if (object) {
+            const url = thumbnailFor(object, { size: 160 });
+            this.app.cacheThumbnail(next.id, url);
+            this.panel.invalidate();
+          }
+        } catch {
+          // A preview is a convenience; keep the asset usable if it fails.
+        } finally {
+          this.pendingThumbs.delete(next.id);
+        }
+        // Limit concurrent WebGL contexts and give the UI a chance to paint.
+        if (this.thumbQueue.length) await new Promise((resolve) => requestAnimationFrame(resolve));
+      }
+    } finally {
+      this.thumbQueueActive = false;
     }
   }
 
@@ -300,12 +316,24 @@ export class LeftSidebar {
     this.app.readdAsset(asset);
   }
 
+  frameAsset(asset) {
+    const ids = this.app.store.get('objects', [])
+      .filter((node) => node.assetId === asset.id)
+      .map((node) => node.id);
+    if (ids.length) {
+      this.app.scene.select(ids);
+      this.app.engine.frameSelection();
+    } else {
+      this.addAssetToScene(asset);
+    }
+  }
+
   assetContextMenu(event, asset) {
     event.preventDefault();
     const items = [];
     if (asset.kind === 'model') {
       items.push({ label: 'Add to scene', icon: 'plus', action: () => this.addAssetToScene(asset) });
-      items.push({ label: 'Frame camera on asset', icon: 'frame', action: () => this.addAssetToScene(asset) });
+      items.push({ label: 'Frame camera on asset', icon: 'frame', action: () => this.frameAsset(asset) });
     }
     if (asset.kind === 'texture') {
       items.push({
@@ -359,7 +387,7 @@ export class LeftSidebar {
         h(
           'div.u-row.u-gap-1',
           {},
-          h('button.icon-btn.icon-sm', { type: 'button', title: 'Add empty group', onClick: () => this.app.scene.addBillboard({ text: 'Group', style: 'chip' }) }, icon('plus', 13)),
+          h('button.icon-btn.icon-sm', { type: 'button', title: 'Add empty group', onClick: () => this.app.scene.addGroup() }, icon('plus', 13)),
         ),
       ),
       h(
@@ -382,6 +410,7 @@ export class LeftSidebar {
       h(
         'div.u-row.u-gap-1',
         { style: { padding: '4px 8px 10px', flexWrap: 'wrap' } },
+        h('button.btn', { type: 'button', title: 'Group selected objects, or add an empty group', onClick: () => this.app.scene.groupSelection() }, icon('group', 13), 'Group'),
         h('button.btn', { type: 'button', onClick: () => this.app.scene.addPrimitive('cube') }, icon('cube', 13), 'Cube'),
         h('button.btn', { type: 'button', onClick: () => this.app.scene.addPrimitive('sphere') }, icon('cube', 13), 'Sphere'),
         h('button.btn', { type: 'button', onClick: () => this.app.scene.addLight('point') }, icon('light', 13), 'Light'),
@@ -504,7 +533,8 @@ export class LeftSidebar {
     const items = [
       { label: 'Rename', icon: 'text', action: () => this.beginRename(node, event.target.closest('.tree-row')) },
       { label: 'Duplicate', icon: 'copy', action: () => this.app.scene.duplicate(node.id) },
-      { label: 'Frame', icon: 'frame', action: () => this.app.scene.select([node.id]) ?? this.app.engine.frameSelection() },
+      { label: 'Frame', icon: 'frame', action: () => { this.app.scene.select([node.id]); this.app.engine.frameSelection(); } },
+      ...(node.kind === 'group' ? [{ label: 'Ungroup', icon: 'group', action: () => this.app.scene.ungroup([node.id]) }] : []),
       { label: '', separator: true },
       { label: 'Add billboard label', icon: 'billboard', action: () => this.app.scene.addBillboard({ text: node.name, targetNodeId: node.id }) },
       node.kind === 'light'

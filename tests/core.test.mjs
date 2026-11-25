@@ -6,7 +6,7 @@ import {
   debounce, mapRange, escapeHtml,
 } from '../src/core/util.js';
 import {
-  extensionOf, basename, dirname, stem, normalizePath, isJunkPath, fileKind,
+  extensionOf, basename, dirname, stem, normalizePath, isJunkPath, fileKind, isSupportedFile,
   mimeForExtension, tokenize, pathTokens, foldersOf, hasExtension,
   foldName, foldPath, stripQuery,
 } from '../src/core/paths.js';
@@ -121,6 +121,10 @@ test('fileKind classifies supported formats', () => {
   assert.equal(fileKind('a.vrm'), 'unknown');
   assert.equal(fileKind('a.drc'), 'unknown');
   assert.equal(fileKind('a.PNG'), 'texture');
+  assert.equal(fileKind('a.tga'), 'texture');
+  assert.equal(fileKind('scene.atlaszip'), 'project');
+  assert.equal(isSupportedFile('a.tga'), true);
+  assert.equal(isSupportedFile('scene.atlaszip'), true);
   assert.equal(fileKind('a.hdr'), 'hdri');
   assert.equal(fileKind('a.mtl'), 'material');
   assert.equal(fileKind('a.mp3'), 'audio');
